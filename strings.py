@@ -26,7 +26,7 @@ from pathlib import Path
 
 import psutil
 
-VERSION = "1.0"
+VERSION = "1.1"
 
 BASE_DIR = Path(__file__).resolve().parent
 STATE_PATH = BASE_DIR / "state.json"
@@ -35,6 +35,7 @@ RESTART_BACKOFF_SECONDS = 3
 TERM_GRACE_SECONDS = 3
 POLL_INTERVAL_SECONDS = 1
 HARDWARE_REFRESH_SECONDS = 30  # how often to re-poll per-app readiness (same cadence as scrutinizer.py's)
+WIFI_IFACE = "wlan0"
 
 # Allow-list of launcher commands STRINGS will run, keyed by the same
 # `cmd` strings scrutinizer.py's APPS table uses, plus the special
@@ -97,9 +98,65 @@ def get_cpu_clock_mhz():
         return None
 
 
+def get_ip_address():
+    # Same UDP-connect trick as scrutinizer.py's/bars.py's get_ip_address()
+    # -- doesn't actually send anything, just asks the kernel which local
+    # address would be used to reach an external host.
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))
+        return s.getsockname()[0]
+    except OSError:
+        return "NO NETWORK"
+    finally:
+        s.close()
+
+
+def get_wifi_link():
+    """Returns (quality_0_to_70, level_dbm) for WIFI_IFACE from
+    /proc/net/wireless, or (None, None) if not found -- duplicated
+    verbatim from scrutinizer.py's get_wifi_link()."""
+    try:
+        lines = Path("/proc/net/wireless").read_text().splitlines()
+    except OSError:
+        return None, None
+    for line in lines:
+        line = line.strip()
+        if not line.startswith(f"{WIFI_IFACE}:"):
+            continue
+        fields = line.split(":", 1)[1].split()
+        try:
+            quality = float(fields[1])
+            level = float(fields[2])
+            return quality, level
+        except (IndexError, ValueError):
+            return None, None
+    return None, None
+
+
+def get_wifi_ssid():
+    try:
+        result = subprocess.run(
+            ["nmcli", "-t", "-f", "active,ssid", "dev", "wifi"],
+            capture_output=True, text=True, timeout=3,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return None
+    for line in result.stdout.splitlines():
+        if line.startswith("yes:"):
+            return line.split(":", 1)[1]
+    return None
+
+
 def gather_stats():
+    # wifi_ssid/wifi_quality/wifi_level/ip added 2026-08-15 -- without
+    # these, SCRUTE's WIFI panel for every puppet fell back to its
+    # "NOT CONNECTED"/"N/A" placeholders regardless of actual link
+    # state, which reads as a real outage even when the puppet is
+    # plainly reachable (its own /status request just answered).
     mem = psutil.virtual_memory()
     disk = psutil.disk_usage("/")
+    wifi_quality, wifi_level = get_wifi_link()
     return {
         "cpu_temp": get_cpu_temp(),
         "cpu_clock_mhz": get_cpu_clock_mhz(),
@@ -107,6 +164,10 @@ def gather_stats():
         "loadavg": list(os.getloadavg()),
         "mem": {"percent": mem.percent, "used": mem.used, "total": mem.total},
         "disk": {"percent": disk.percent, "used": disk.used, "free": disk.free},
+        "wifi_ssid": get_wifi_ssid(),
+        "wifi_quality": wifi_quality,
+        "wifi_level": wifi_level,
+        "ip": get_ip_address(),
     }
 
 
@@ -339,7 +400,14 @@ def make_handler(supervisor, readiness_checker):
                 # _try_launch), but rejecting up front means the caller
                 # (SCRUTE) gets a clear, immediate answer instead of a
                 # silently-broken assignment.
-                if app and not Path(f"/usr/local/bin/{app}").exists():
+                # Check the app's actual launcher binary (LAUNCH_COMMANDS[app][0]),
+                # not a path built from the app name -- "identify" is a
+                # pseudo-app with no /usr/local/bin/identify of its own, it
+                # maps to bars --identify, so the naive name-based path
+                # always 409'd it even when bars itself was installed fine
+                # (caught live: IDENTIFY PUPPETS reported every puppet
+                # UNREACHABLE, when the real response was this 409).
+                if app and not Path(LAUNCH_COMMANDS[app][0]).exists():
                     self._send_json(409, {"error": f"{app!r} is a known app but isn't installed on this puppet"})
                     return
                 supervisor.assign(app or None)
