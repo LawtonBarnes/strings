@@ -16,6 +16,8 @@ or dashboard, puppets are unattended by design.
 """
 import json
 import os
+import re
+import socket
 import subprocess
 import threading
 import time
@@ -32,6 +34,7 @@ PORT = 8420
 RESTART_BACKOFF_SECONDS = 3
 TERM_GRACE_SECONDS = 3
 POLL_INTERVAL_SECONDS = 1
+HARDWARE_REFRESH_SECONDS = 30  # how often to re-poll per-app readiness (same cadence as scrutinizer.py's)
 
 # Allow-list of launcher commands STRINGS will run, keyed by the same
 # `cmd` strings scrutinizer.py's APPS table uses, plus the special
@@ -105,6 +108,86 @@ def gather_stats():
         "mem": {"percent": mem.percent, "used": mem.used, "total": mem.total},
         "disk": {"percent": disk.percent, "used": disk.used, "free": disk.free},
     }
+
+
+# Per-app readiness checks -- answers "could THIS puppet actually run
+# that app right now," which is what an assignment decision from MP
+# needs (unlike GET /status's cpu/mem/disk, which is about this
+# puppet's health generally). Duplicated from scrutinizer.py's
+# check_loudness_mic/check_internet rather than imported, same
+# no-shared-library convention as the stat-gathering helpers above.
+LOUDNESS_SETTINGS_PATH = "/opt/loudness/settings.ini"
+LOUDNESS_DEVICE_RE = re.compile(r"^device\s*=\s*plughw:(\d+),(\d+)", re.MULTILINE)
+
+
+def check_loudness_mic():
+    try:
+        text = Path(LOUDNESS_SETTINGS_PATH).read_text()
+    except OSError:
+        return False
+    match = LOUDNESS_DEVICE_RE.search(text)
+    if not match:
+        return False
+    card, device = match.groups()
+    return Path(f"/dev/snd/pcmC{card}D{device}c").exists()
+
+
+def check_internet():
+    try:
+        with socket.create_connection(("8.8.8.8", 53), timeout=1.5):
+            return True
+    except OSError:
+        return False
+
+
+# None = always ready once the launcher exists (matches scrutinizer.py's
+# APPS table: BARS has no hw_check either). "identify" is deliberately
+# excluded -- it's not a real assignable app, it's always available via
+# bars.py itself.
+HW_CHECKS = {
+    "bars": None,
+    "loudness": check_loudness_mic,
+    "weatherstar": check_internet,
+    "channel38": check_internet,
+}
+
+
+class ReadinessChecker:
+    """Background-thread polling of per-app readiness, same shape as
+    RemotePoller on the SCRUTE side -- these checks (network calls,
+    file/device reads) are cheap individually but no reason to redo them
+    on every GET /status, so they're computed on a timer and cached."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._readiness = {}
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def get(self):
+        with self._lock:
+            return dict(self._readiness)
+
+    def _run(self):
+        while True:
+            result = self._compute()
+            with self._lock:
+                self._readiness = result
+            time.sleep(HARDWARE_REFRESH_SECONDS)
+
+    def _compute(self):
+        readiness = {}
+        for app, check in HW_CHECKS.items():
+            if not Path(f"/usr/local/bin/{app}").exists():
+                readiness[app] = False  # not even installed on this puppet
+                continue
+            if check is None:
+                readiness[app] = True
+                continue
+            try:
+                readiness[app] = check()
+            except Exception:
+                readiness[app] = False
+        return readiness
 
 
 class Supervisor:
@@ -185,7 +268,7 @@ class Supervisor:
                 time.sleep(RESTART_BACKOFF_SECONDS)
 
 
-def make_handler(supervisor):
+def make_handler(supervisor, readiness_checker):
     class Handler(BaseHTTPRequestHandler):
         def _send_json(self, code, payload):
             body = json.dumps(payload).encode()
@@ -201,6 +284,7 @@ def make_handler(supervisor):
                 status.update(gather_stats())
                 status["agent_version"] = VERSION
                 status["agent_uptime_s"] = round(time.time() - supervisor.start_time, 1)
+                status["hardware"] = readiness_checker.get()
                 self._send_json(200, status)
             else:
                 self._send_json(404, {"error": "not found"})
@@ -237,7 +321,8 @@ def make_handler(supervisor):
 
 def main():
     supervisor = Supervisor()
-    server = ThreadingHTTPServer(("0.0.0.0", PORT), make_handler(supervisor))
+    readiness_checker = ReadinessChecker()
+    server = ThreadingHTTPServer(("0.0.0.0", PORT), make_handler(supervisor, readiness_checker))
     threading.Thread(target=server.serve_forever, daemon=True).start()
     supervisor.run()
 
