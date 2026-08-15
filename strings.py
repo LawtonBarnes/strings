@@ -310,6 +310,7 @@ def make_handler(supervisor, readiness_checker):
                 status["agent_version"] = VERSION
                 status["agent_uptime_s"] = round(time.time() - supervisor.start_time, 1)
                 status["hardware"] = readiness_checker.get()
+                status["hostname"] = socket.gethostname()
                 self._send_json(200, status)
             else:
                 self._send_json(404, {"error": "not found"})
