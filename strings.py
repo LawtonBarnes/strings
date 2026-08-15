@@ -34,13 +34,29 @@ TERM_GRACE_SECONDS = 3
 POLL_INTERVAL_SECONDS = 1
 
 # Allow-list of launcher commands STRINGS will run, keyed by the same
-# `cmd` strings scrutinizer.py's APPS table uses. /assign takes this
-# from network input, so validating against a known set (rather than
-# building "/usr/local/bin/" + whatever-was-sent) is what stops a
-# crafted app value like "../../../bin/sh" from becoming a path-
-# traversal RCE -- subprocess.Popen([path]) doesn't go through a shell,
-# but it will happily exec any file the resulting path resolves to.
-KNOWN_APPS = {"bars", "loudness", "channel38", "weatherstar"}
+# `cmd` strings scrutinizer.py's APPS table uses, plus the special
+# "identify" pseudo-app below. /assign takes this from network input,
+# so validating against a known set (rather than building
+# "/usr/local/bin/" + whatever-was-sent) is what stops a crafted app
+# value like "../../../bin/sh" from becoming a path-traversal RCE --
+# subprocess.Popen([path]) doesn't go through a shell, but it will
+# happily exec any file the resulting path resolves to.
+#
+# "identify" isn't a real sibling app -- it's bars.py with its hostname
+# overlay forced on via --identify (no keypress needed, since puppets
+# have no input device), used to figure out which physical Pi/CRT is
+# which after the McBrain stack gets moved and recabled. It's also
+# IDLE_APP below: what runs whenever no real assignment exists, instead
+# of a puppet just sitting there doing nothing.
+LAUNCH_COMMANDS = {
+    "bars": ["/usr/local/bin/bars"],
+    "loudness": ["/usr/local/bin/loudness"],
+    "channel38": ["/usr/local/bin/channel38"],
+    "weatherstar": ["/usr/local/bin/weatherstar"],
+    "identify": ["/usr/local/bin/bars", "--identify"],
+}
+KNOWN_APPS = set(LAUNCH_COMMANDS)
+IDLE_APP = "identify"
 
 
 def read_state():
@@ -142,17 +158,18 @@ class Supervisor:
         while True:
             self.reload_event.clear()
             app = read_state().get("app")
+            if not app or app not in KNOWN_APPS:
+                # No real assignment yet -- default to IDLE_APP (SMPTE
+                # bars + hostname overlay) rather than a blank screen,
+                # so an unassigned puppet is still useful for figuring
+                # out which physical box it is. Doesn't touch
+                # state.json -- the *real* assignment (or lack of one)
+                # stays whatever it was, this is just what runs.
+                app = IDLE_APP
             with self.lock:
                 self.app = app
 
-            if not app or app not in KNOWN_APPS:
-                # Idle -- no valid assignment. Wait for one rather than
-                # busy-looping; no console output is attempted here
-                # (deferred: a real "waiting for assignment" screen).
-                self.reload_event.wait()
-                continue
-
-            proc = subprocess.Popen([f"/usr/local/bin/{app}"])
+            proc = subprocess.Popen(LAUNCH_COMMANDS[app])
             with self.lock:
                 self.proc = proc
                 self.app_started_at = time.time()
@@ -198,11 +215,14 @@ def make_handler(supervisor):
 
             if self.path == "/assign":
                 app = payload.get("app")
-                if app not in KNOWN_APPS:
-                    self._send_json(400, {"error": f"unknown app {app!r}, must be one of {sorted(KNOWN_APPS)}"})
+                # None/missing/"" explicitly clears the assignment
+                # (falls back to IDLE_APP) rather than being rejected --
+                # distinct from an actually-unrecognized app name.
+                if app not in KNOWN_APPS and app is not None and app != "":
+                    self._send_json(400, {"error": f"unknown app {app!r}, must be one of {sorted(KNOWN_APPS)} or null to clear"})
                     return
-                supervisor.assign(app)
-                self._send_json(200, {"ok": True, "app": app})
+                supervisor.assign(app or None)
+                self._send_json(200, {"ok": True, "app": app or None})
             elif self.path == "/restart":
                 supervisor.restart()
                 self._send_json(200, {"ok": True})
