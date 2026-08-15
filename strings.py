@@ -24,9 +24,11 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+import evdev
 import psutil
+from evdev import ecodes
 
-VERSION = "1.3"
+VERSION = "1.4"
 
 BASE_DIR = Path(__file__).resolve().parent
 STATE_PATH = BASE_DIR / "state.json"
@@ -36,6 +38,23 @@ TERM_GRACE_SECONDS = 3
 POLL_INTERVAL_SECONDS = 1
 HARDWARE_REFRESH_SECONDS = 30  # how often to re-poll per-app readiness (same cadence as scrutinizer.py's)
 WIFI_IFACE = "wlan0"
+
+# Keys SCRUTE can relay live to whatever app is currently running here
+# (see /input below) -- deliberately just the content-adjustment keys
+# (BARS pattern cycling, LOUDNESS gain, Vol mute), NOT Home/Back/Q/Esc/
+# Power/Compose. Those already mean "exit this app" in every app's own
+# handle_keycode (EXIT_GOTO_HOME, sys.exit, etc.) -- relaying them would
+# kill/restart whatever's running instead of just adjusting it. SCRUTE
+# itself is what those keys act on locally when a puppet is selected.
+RELAY_KEYS = {
+    "KEY_UP": ecodes.KEY_UP,
+    "KEY_DOWN": ecodes.KEY_DOWN,
+    "KEY_LEFT": ecodes.KEY_LEFT,
+    "KEY_RIGHT": ecodes.KEY_RIGHT,
+    "KEY_ENTER": ecodes.KEY_ENTER,
+    "KEY_VOLUMEUP": ecodes.KEY_VOLUMEUP,
+    "KEY_VOLUMEDOWN": ecodes.KEY_VOLUMEDOWN,
+}
 
 # Allow-list of launcher commands STRINGS will run, keyed by the same
 # `cmd` strings scrutinizer.py's APPS table uses, plus the special
@@ -181,6 +200,41 @@ def gather_stats():
         "wifi_level": wifi_level,
         "ip": get_ip_address(),
     }
+
+
+def create_relay_device():
+    """A persistent, never-removed virtual keyboard for /input to emit
+    synthetic keypresses through -- created once here, before
+    Supervisor.run() ever launches an app, so it already exists by the
+    time that app's own find_keyboard_devices()-style evdev scan runs at
+    ITS startup (every sibling app already enumerates all EV_KEY-capable
+    devices rather than hardcoding paths, so this needs zero app-side
+    changes to be picked up). Needs metalshop to have write access to
+    /dev/uinput -- already granted fleet-wide via the udev rule added
+    for WEATHERSTAR's dummy-pointer fix (/etc/udev/rules.d/99-uinput.rules).
+    Returns None if creation fails (e.g. rule missing on a not-yet-
+    updated puppet) so /input can degrade to reporting an error instead
+    of crashing the whole daemon over it."""
+    try:
+        return evdev.UInput(
+            {ecodes.EV_KEY: list(RELAY_KEYS.values())},
+            name="strings-remote-relay",
+        )
+    except OSError as exc:
+        print(f"[strings] couldn't create relay input device: {exc}", flush=True)
+        return None
+
+
+def send_relay_key(device, key_name):
+    """Emits one keydown+keyup (with SYN_REPORT after each) for key_name
+    through device -- matches a real keypress exactly, so every app's
+    existing evdev-reading code (already watching event.value == 1 for
+    "pressed") handles it with no special-casing."""
+    code = RELAY_KEYS[key_name]
+    device.write(ecodes.EV_KEY, code, 1)
+    device.syn()
+    device.write(ecodes.EV_KEY, code, 0)
+    device.syn()
 
 
 # Per-app readiness checks -- answers "could THIS puppet actually run
@@ -396,7 +450,7 @@ class Supervisor:
                 time.sleep(RESTART_BACKOFF_SECONDS)
 
 
-def make_handler(supervisor, readiness_checker):
+def make_handler(supervisor, readiness_checker, relay_device):
     class Handler(BaseHTTPRequestHandler):
         def _send_json(self, code, payload):
             body = json.dumps(payload).encode()
@@ -457,6 +511,20 @@ def make_handler(supervisor, readiness_checker):
             elif self.path == "/restart":
                 supervisor.restart()
                 self._send_json(200, {"ok": True})
+            elif self.path == "/input":
+                key = payload.get("key")
+                if key not in RELAY_KEYS:
+                    self._send_json(400, {"error": f"unknown key {key!r}, must be one of {sorted(RELAY_KEYS)}"})
+                    return
+                if relay_device is None:
+                    # Only happens if /dev/uinput wasn't writable at
+                    # startup (see create_relay_device) -- a 503 tells
+                    # SCRUTE this puppet genuinely can't relay right now,
+                    # distinct from a bad request.
+                    self._send_json(503, {"error": "relay device unavailable on this puppet"})
+                    return
+                send_relay_key(relay_device, key)
+                self._send_json(200, {"ok": True})
             else:
                 self._send_json(404, {"error": "not found"})
 
@@ -469,7 +537,10 @@ def make_handler(supervisor, readiness_checker):
 def main():
     supervisor = Supervisor()
     readiness_checker = ReadinessChecker()
-    server = ThreadingHTTPServer(("0.0.0.0", PORT), make_handler(supervisor, readiness_checker))
+    # Created before supervisor.run() ever launches an app -- see
+    # create_relay_device()'s docstring for why the ordering matters.
+    relay_device = create_relay_device()
+    server = ThreadingHTTPServer(("0.0.0.0", PORT), make_handler(supervisor, readiness_checker, relay_device))
     threading.Thread(target=server.serve_forever, daemon=True).start()
     supervisor.run()
 
