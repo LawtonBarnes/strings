@@ -237,6 +237,13 @@ class Supervisor:
             proc.kill()
             proc.wait()
 
+    def _try_launch(self, app):
+        try:
+            return subprocess.Popen(LAUNCH_COMMANDS[app])
+        except OSError as exc:
+            print(f"[strings] failed to launch {app!r}: {exc}", flush=True)
+            return None
+
     def run(self):
         while True:
             self.reload_event.clear()
@@ -249,11 +256,29 @@ class Supervisor:
                 # state.json -- the *real* assignment (or lack of one)
                 # stays whatever it was, this is just what runs.
                 app = IDLE_APP
+
+            proc = self._try_launch(app)
+            if proc is None and app != IDLE_APP:
+                # /assign already rejects apps whose launcher isn't
+                # installed here (see do_POST), but this is the backstop
+                # for anything that slips through anyway -- a race, a
+                # hand-edited state.json, a launcher removed after being
+                # assigned. Don't retry the same broken assignment in a
+                # tight loop forever; fall back to the idle default
+                # instead. state.json itself is untouched, so fixing the
+                # underlying problem (installing the app, reassigning)
+                # is picked up automatically on the next cycle.
+                print(f"[strings] falling back to {IDLE_APP!r}", flush=True)
+                app = IDLE_APP
+                proc = self._try_launch(app)
+            if proc is None:
+                # Even the idle fallback failed (e.g. bars itself is
+                # missing) -- nothing left to try this cycle.
+                time.sleep(RESTART_BACKOFF_SECONDS)
+                continue
+
             with self.lock:
                 self.app = app
-
-            proc = subprocess.Popen(LAUNCH_COMMANDS[app])
-            with self.lock:
                 self.proc = proc
                 self.app_started_at = time.time()
 
@@ -304,6 +329,17 @@ def make_handler(supervisor, readiness_checker):
                 # distinct from an actually-unrecognized app name.
                 if app not in KNOWN_APPS and app is not None and app != "":
                     self._send_json(400, {"error": f"unknown app {app!r}, must be one of {sorted(KNOWN_APPS)} or null to clear"})
+                    return
+                # A name can be a *known* app fleet-wide (it's in
+                # KNOWN_APPS) without being installed on *this* puppet --
+                # reject that here rather than accepting an assignment
+                # that can only ever fail to launch. The Supervisor loop
+                # also guards against this independently (see
+                # _try_launch), but rejecting up front means the caller
+                # (SCRUTE) gets a clear, immediate answer instead of a
+                # silently-broken assignment.
+                if app and not Path(f"/usr/local/bin/{app}").exists():
+                    self._send_json(409, {"error": f"{app!r} is a known app but isn't installed on this puppet"})
                     return
                 supervisor.assign(app or None)
                 self._send_json(200, {"ok": True, "app": app or None})
