@@ -26,7 +26,7 @@ from pathlib import Path
 
 import psutil
 
-VERSION = "1.2"
+VERSION = "1.3"
 
 BASE_DIR = Path(__file__).resolve().parent
 STATE_PATH = BASE_DIR / "state.json"
@@ -248,18 +248,27 @@ class ReadinessChecker:
             time.sleep(HARDWARE_REFRESH_SECONDS)
 
     def _compute(self):
+        # Status strings instead of plain bools (2026-08-15) -- "not
+        # installed on this puppet at all" and "installed but its own
+        # hw_check failed" used to collapse into the same `False`, which
+        # SCRUTE then always displayed as "HARDWARE NOT FOUND" -- deeply
+        # confusing for WEATHERSTAR/CHANNEL 38 specifically, since
+        # neither has ever been installed on any puppet and neither
+        # check is actually about physical hardware (check_internet).
+        # Caught live: user saw "HARDWARE NOT FOUND" under two apps that
+        # "don't require a device."
         readiness = {}
         for app, check in HW_CHECKS.items():
             if not Path(f"/usr/local/bin/{app}").exists():
-                readiness[app] = False  # not even installed on this puppet
+                readiness[app] = "not_installed"
                 continue
             if check is None:
-                readiness[app] = True
+                readiness[app] = "ready"
                 continue
             try:
-                readiness[app] = check()
+                readiness[app] = "ready" if check() else "hardware_not_found"
             except Exception:
-                readiness[app] = False
+                readiness[app] = "hardware_not_found"
         return readiness
 
 
