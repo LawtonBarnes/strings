@@ -26,7 +26,7 @@ from pathlib import Path
 
 import psutil
 
-VERSION = "1.1"
+VERSION = "1.2"
 
 BASE_DIR = Path(__file__).resolve().parent
 STATE_PATH = BASE_DIR / "state.json"
@@ -61,6 +61,18 @@ LAUNCH_COMMANDS = {
 }
 KNOWN_APPS = set(LAUNCH_COMMANDS)
 IDLE_APP = "identify"
+
+# Absolute script paths for the actual pkill sweep below -- distinct
+# from LAUNCH_COMMANDS, whose values are the /usr/local/bin/<app>
+# *launcher* (which wraps the real script in `sudo openvt ...` when not
+# already on tty1 -- see each launcher's own comment). "identify" isn't
+# listed separately since it's bars.py with a flag, same script path.
+APP_SCRIPTS = {
+    "bars": "/opt/bars/bars.py",
+    "loudness": "/opt/loudness/loudness.py",
+    "channel38": "/opt/channel38/channel38.py",
+    "weatherstar": "/opt/weatherstar/weatherstar_launcher.py",
+}
 
 
 def read_state():
@@ -289,14 +301,34 @@ class Supervisor:
     def _terminate_current(self):
         with self.lock:
             proc = self.proc
-        if proc is None or proc.poll() is not None:
-            return
-        proc.terminate()
-        try:
-            proc.wait(timeout=TERM_GRACE_SECONDS)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=TERM_GRACE_SECONDS)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+        self._kill_stray_apps()
+
+    @staticmethod
+    def _kill_stray_apps():
+        # Belt-and-suspenders cleanup, confirmed necessary live: proc
+        # above is the launcher's own Popen handle, which is `sudo
+        # openvt -f -c 1 -s -w -- python3 <script>` whenever STRINGS
+        # isn't itself on tty1 (systemd services never are -- see each
+        # /usr/local/bin/<app> launcher's own comment). SIGTERM/SIGKILL
+        # sent to that top PID kills `sudo`, but sudo/openvt don't
+        # reliably forward it down to the real python3 process --
+        # confirmed live after several reassignment cycles left 2-3
+        # generations of orphaned bars.py/loudness.py processes (PPID 1)
+        # all still running and fighting over /dev/fb0 and tty1. Killing
+        # by the known script path is robust regardless of how many
+        # sudo/openvt layers deep the real process ended up, and is safe
+        # to run unconditionally since only STRINGS ever launches these
+        # on a puppet -- there's never a legitimate reason for one of
+        # them to be running outside of what STRINGS itself just started.
+        for script in APP_SCRIPTS.values():
+            subprocess.run(["sudo", "pkill", "-9", "-f", script], capture_output=True)
 
     def _try_launch(self, app):
         try:
@@ -318,6 +350,7 @@ class Supervisor:
                 # stays whatever it was, this is just what runs.
                 app = IDLE_APP
 
+            self._kill_stray_apps()
             proc = self._try_launch(app)
             if proc is None and app != IDLE_APP:
                 # /assign already rejects apps whose launcher isn't
