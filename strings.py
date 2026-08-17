@@ -76,35 +76,25 @@ RELAY_KEYS = {
 }
 
 # Allow-list of launcher commands STRINGS will run, keyed by the same
-# `cmd` strings scrutinizer.py's APPS table uses, plus the special
-# "identify" pseudo-app below. /assign takes this from network input,
-# so validating against a known set (rather than building
-# "/usr/local/bin/" + whatever-was-sent) is what stops a crafted app
-# value like "../../../bin/sh" from becoming a path-traversal RCE --
-# subprocess.Popen([path]) doesn't go through a shell, but it will
-# happily exec any file the resulting path resolves to.
-#
-# "identify" isn't a real sibling app -- it's bars.py with its hostname
-# overlay forced on via --identify (no keypress needed, since puppets
-# have no input device), used to figure out which physical Pi/CRT is
-# which after the McBrain stack gets moved and recabled. It's also
-# IDLE_APP below: what runs whenever no real assignment exists, instead
-# of a puppet just sitting there doing nothing.
+# `cmd` strings scrutinizer.py's APPS table uses. /assign takes this
+# from network input, so validating against a known set (rather than
+# building "/usr/local/bin/" + whatever-was-sent) is what stops a
+# crafted app value like "../../../bin/sh" from becoming a
+# path-traversal RCE -- subprocess.Popen([path]) doesn't go through a
+# shell, but it will happily exec any file the resulting path resolves
+# to.
 LAUNCH_COMMANDS = {
     "bars": ["/usr/local/bin/bars"],
     "loudness": ["/usr/local/bin/loudness"],
     "channel38": ["/usr/local/bin/channel38"],
     "weatherstar": ["/usr/local/bin/weatherstar"],
-    "identify": ["/usr/local/bin/bars", "--identify"],
 }
 KNOWN_APPS = set(LAUNCH_COMMANDS)
-IDLE_APP = "identify"
 
 # Absolute script paths for the actual pkill sweep below -- distinct
 # from LAUNCH_COMMANDS, whose values are the /usr/local/bin/<app>
 # *launcher* (which wraps the real script in `sudo openvt ...` when not
-# already on tty1 -- see each launcher's own comment). "identify" isn't
-# listed separately since it's bars.py with a flag, same script path.
+# already on tty1 -- see each launcher's own comment).
 APP_SCRIPTS = {
     "bars": "/opt/bars/bars.py",
     "loudness": "/opt/loudness/loudness.py",
@@ -287,9 +277,7 @@ def check_internet():
 
 
 # None = always ready once the launcher exists (matches scrutinizer.py's
-# APPS table: BARS has no hw_check either). "identify" is deliberately
-# excluded -- it's not a real assignable app, it's always available via
-# bars.py itself.
+# APPS table: BARS has no hw_check either).
 HW_CHECKS = {
     "bars": None,
     "loudness": check_loudness_mic,
@@ -454,32 +442,30 @@ class Supervisor:
             self.reload_event.clear()
             app = read_state().get("app")
             if not app or app not in KNOWN_APPS:
-                # No real assignment yet -- default to IDLE_APP (SMPTE
-                # bars + hostname overlay) rather than a blank screen,
-                # so an unassigned puppet is still useful for figuring
-                # out which physical box it is. Doesn't touch
-                # state.json -- the *real* assignment (or lack of one)
-                # stays whatever it was, this is just what runs.
-                app = IDLE_APP
+                # No real assignment -- sit genuinely idle (nothing
+                # running) until an /assign call sets one and wakes
+                # reload_event. Doesn't touch state.json -- the *real*
+                # assignment (or lack of one) stays whatever it was.
+                self._kill_stray_apps()
+                with self.lock:
+                    self.app = None
+                    self.proc = None
+                    self.app_started_at = None
+                self.reload_event.wait(POLL_INTERVAL_SECONDS)
+                continue
 
             self._kill_stray_apps()
             proc = self._try_launch(app)
-            if proc is None and app != IDLE_APP:
+            if proc is None:
                 # /assign already rejects apps whose launcher isn't
                 # installed here (see do_POST), but this is the backstop
                 # for anything that slips through anyway -- a race, a
                 # hand-edited state.json, a launcher removed after being
                 # assigned. Don't retry the same broken assignment in a
-                # tight loop forever; fall back to the idle default
-                # instead. state.json itself is untouched, so fixing the
-                # underlying problem (installing the app, reassigning)
-                # is picked up automatically on the next cycle.
-                print(f"[strings] falling back to {IDLE_APP!r}", flush=True)
-                app = IDLE_APP
-                proc = self._try_launch(app)
-            if proc is None:
-                # Even the idle fallback failed (e.g. bars itself is
-                # missing) -- nothing left to try this cycle.
+                # tight loop forever; state.json itself is untouched, so
+                # fixing the underlying problem (installing the app,
+                # reassigning) is picked up automatically next cycle.
+                print(f"[strings] failed to launch {app!r}, idling", flush=True)
                 time.sleep(RESTART_BACKOFF_SECONDS)
                 continue
 
@@ -536,9 +522,10 @@ def make_handler(supervisor, readiness_checker, relay_device):
 
             if self.path == "/assign":
                 app = payload.get("app")
-                # None/missing/"" explicitly clears the assignment
-                # (falls back to IDLE_APP) rather than being rejected --
-                # distinct from an actually-unrecognized app name.
+                # None/missing/"" explicitly clears the assignment (sits
+                # idle -- see Supervisor.run()) rather than being
+                # rejected -- distinct from an actually-unrecognized app
+                # name.
                 if app not in KNOWN_APPS and app is not None and app != "":
                     self._send_json(400, {"error": f"unknown app {app!r}, must be one of {sorted(KNOWN_APPS)} or null to clear"})
                     return
@@ -549,14 +536,9 @@ def make_handler(supervisor, readiness_checker, relay_device):
                 # also guards against this independently (see
                 # _try_launch), but rejecting up front means the caller
                 # (SCRUTE) gets a clear, immediate answer instead of a
-                # silently-broken assignment.
-                # Check the app's actual launcher binary (LAUNCH_COMMANDS[app][0]),
-                # not a path built from the app name -- "identify" is a
-                # pseudo-app with no /usr/local/bin/identify of its own, it
-                # maps to bars --identify, so the naive name-based path
-                # always 409'd it even when bars itself was installed fine
-                # (caught live: IDENTIFY PUPPETS reported every puppet
-                # UNREACHABLE, when the real response was this 409).
+                # silently-broken assignment. Checks the app's actual
+                # launcher binary (LAUNCH_COMMANDS[app][0]), not a path
+                # built from the app name.
                 if app and not Path(LAUNCH_COMMANDS[app][0]).exists():
                     self._send_json(409, {"error": f"{app!r} is a known app but isn't installed on this puppet"})
                     return
