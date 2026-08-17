@@ -28,24 +28,42 @@ import evdev
 import psutil
 from evdev import ecodes
 
-VERSION = "1.4"
+VERSION = "1.5"
 
 BASE_DIR = Path(__file__).resolve().parent
 STATE_PATH = BASE_DIR / "state.json"
 PORT = 8420
 RESTART_BACKOFF_SECONDS = 3
+# openvt's own exit code (propagated through sudo) when it fails to grab
+# VT1 right after a switch, printing "Couldn't deallocate console 1" --
+# a narrow, self-identifying kernel-level VT-subsystem race between one
+# app's teardown and the next app's openvt invocation (see
+# _kill_stray_apps() -- mitigated there, not fully eliminated even with
+# getty@tty1.service disabled on every puppet, confirmed live 2026-08-16).
+# Since this exact code means "openvt lost a timing race, not a real
+# app crash," retrying near-instantly here is safe and turns what would
+# otherwise be a full RESTART_BACKOFF_SECONDS-long visible blip into a
+# sub-second one -- any *other* exit code still gets the normal backoff,
+# so a genuinely broken app still can't tight-loop.
+OPENVT_RACE_EXIT_CODE = 8
+OPENVT_RACE_BACKOFF_SECONDS = 0.2
 TERM_GRACE_SECONDS = 3
 POLL_INTERVAL_SECONDS = 1
 HARDWARE_REFRESH_SECONDS = 30  # how often to re-poll per-app readiness (same cadence as scrutinizer.py's)
 WIFI_IFACE = "wlan0"
 
 # Keys SCRUTE can relay live to whatever app is currently running here
-# (see /input below) -- deliberately just the content-adjustment keys
-# (BARS pattern cycling, LOUDNESS gain, Vol mute), NOT Home/Back/Q/Esc/
-# Power/Compose. Those already mean "exit this app" in every app's own
+# (see /input below) -- content-adjustment keys (BARS pattern cycling,
+# LOUDNESS gain, Vol mute) plus Power (2026-08-17), NOT Home/Back/Q/Esc/
+# Compose. Those already mean "exit this app" in every app's own
 # handle_keycode (EXIT_GOTO_HOME, sys.exit, etc.) -- relaying them would
 # kill/restart whatever's running instead of just adjusting it. SCRUTE
 # itself is what those keys act on locally when a puppet is selected.
+# Power is relayed rather than kept local so the *target*'s own confirm
+# dialog shows on the machine you're actually controlling, not on the
+# machine holding the remote -- see scrutinizer.py's CONTROL_RELAY_KEYS
+# for the matching change and the logind power-key bug this depended on
+# fixing first (HandlePowerKey=ignore, all 6 fleet machines, same day).
 RELAY_KEYS = {
     "KEY_UP": ecodes.KEY_UP,
     "KEY_DOWN": ecodes.KEY_DOWN,
@@ -54,6 +72,7 @@ RELAY_KEYS = {
     "KEY_ENTER": ecodes.KEY_ENTER,
     "KEY_VOLUMEUP": ecodes.KEY_VOLUMEUP,
     "KEY_VOLUMEDOWN": ecodes.KEY_VOLUMEDOWN,
+    "KEY_POWER": ecodes.KEY_POWER,
 }
 
 # Allow-list of launcher commands STRINGS will run, keyed by the same
@@ -390,6 +409,36 @@ class Supervisor:
         # to run unconditionally since only STRINGS ever launches these
         # on a puppet -- there's never a legitimate reason for one of
         # them to be running outside of what STRINGS itself just started.
+        #
+        # Kill only the deepest python3 process first, THEN sweep
+        # everything as a backstop (2026-08-16) -- the previous version
+        # pattern-killed sudo/openvt/python3 all in the same instant,
+        # which denied openvt (running with -w, i.e. "wait for my
+        # child") any chance to take its own natural, clean exit path:
+        # confirmed live via strace that killing the whole chain at once
+        # reliably made the *next* app's openvt invocation fail once
+        # ("openvt: Couldn't deallocate console 1", exit code 8, sudo
+        # propagating openvt's own exit status) before self-healing via
+        # STRINGS's normal 3s crash-restart -- visible as a
+        # launch-quit-relaunch blip on every app switch. Never
+        # reproduced from a cold launch with nothing to clean up
+        # (nothing alive to interrupt), only ever on a genuine switch --
+        # consistent with this exact race. Killing just python3 first
+        # lets openvt see its own child exit and unwind through its own
+        # designed cleanup instead of being cut off mid-flight; the
+        # anchored ^python3 pattern (vs a bare substring match) is what
+        # keeps this from also matching the sudo/openvt layers, whose
+        # command lines contain the same script path as a later
+        # argument. The broad sweep below is unchanged from before and
+        # still SIGKILLs by pattern across all 3 layers -- this is the
+        # original orphan-pileup backstop (bars.py/loudness.py found
+        # alive 2-3 generations deep after SIGTERM alone didn't
+        # propagate through sudo/openvt), preserved as a fallback for
+        # anything that doesn't exit on its own in the grace window.
+        KILL_GRACE_SECONDS = 1.0
+        for script in APP_SCRIPTS.values():
+            subprocess.run(["sudo", "pkill", "-15", "-f", f"^python3 {script}"], capture_output=True)
+        time.sleep(KILL_GRACE_SECONDS)
         for script in APP_SCRIPTS.values():
             subprocess.run(["sudo", "pkill", "-9", "-f", script], capture_output=True)
 
@@ -445,9 +494,14 @@ class Supervisor:
             if self.reload_event.is_set():
                 self._terminate_current()
             else:
+                backoff = (
+                    OPENVT_RACE_BACKOFF_SECONDS
+                    if proc.returncode == OPENVT_RACE_EXIT_CODE
+                    else RESTART_BACKOFF_SECONDS
+                )
                 print(f"[strings] {app} exited (code {proc.returncode}), "
-                      f"restarting in {RESTART_BACKOFF_SECONDS}s", flush=True)
-                time.sleep(RESTART_BACKOFF_SECONDS)
+                      f"restarting in {backoff}s", flush=True)
+                time.sleep(backoff)
 
 
 def make_handler(supervisor, readiness_checker, relay_device):
