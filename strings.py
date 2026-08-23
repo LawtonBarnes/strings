@@ -172,6 +172,29 @@ def get_cpu_clock_mhz():
         return None
 
 
+def get_throttled_status():
+    # Duplicated from scrutinizer.py's get_throttled_status() -- see its
+    # own comment for the bit-field rationale (current-condition bits
+    # 0-3 only; the "has happened since boot" bits 16-19 aren't
+    # actionable on a live dashboard).
+    try:
+        result = subprocess.run(
+            ["vcgencmd", "get_throttled"], capture_output=True, text=True, timeout=3
+        )
+        value = int(result.stdout.strip().split("=")[1], 16)
+    except (subprocess.SubprocessError, OSError, ValueError, IndexError):
+        return "UNKNOWN"
+    if value & 0x1:
+        return "UNDERVOLTAGE"
+    if value & 0x4:
+        return "THROTTLED"
+    if value & 0x8:
+        return "TEMP LIMIT"
+    if value & 0x2:
+        return "FREQ CAPPED"
+    return "OK"
+
+
 def get_ip_address():
     # Same UDP-connect trick as scrutinizer.py's/bars.py's get_ip_address()
     # -- doesn't actually send anything, just asks the kernel which local
@@ -234,6 +257,7 @@ def gather_stats():
     return {
         "cpu_temp": get_cpu_temp(),
         "cpu_clock_mhz": get_cpu_clock_mhz(),
+        "throttled": get_throttled_status(),
         "cpu_percore": psutil.cpu_percent(percpu=True),
         "loadavg": list(os.getloadavg()),
         "mem": {"percent": mem.percent, "used": mem.used, "total": mem.total},
