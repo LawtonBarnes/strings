@@ -73,6 +73,11 @@ RELAY_KEYS = {
     "KEY_VOLUMEUP": ecodes.KEY_VOLUMEUP,
     "KEY_VOLUMEDOWN": ecodes.KEY_VOLUMEDOWN,
     "KEY_POWER": ecodes.KEY_POWER,
+    # bebop is the first app where Back means "go up a menu level"
+    # rather than "exit the app" -- see scrutinizer.py's
+    # _handle_control_mode_keycode for the app-aware relay decision
+    # this key needs on the SCRUTE side.
+    "KEY_BACK": ecodes.KEY_BACK,
 }
 
 # Allow-list of launcher commands STRINGS will run, keyed by the same
@@ -88,6 +93,7 @@ LAUNCH_COMMANDS = {
     "loudness": ["/usr/local/bin/loudness"],
     "channel38": ["/usr/local/bin/channel38"],
     "weatherstar": ["/usr/local/bin/weatherstar"],
+    "bebop": ["/usr/local/bin/bebop"],
 }
 KNOWN_APPS = set(LAUNCH_COMMANDS)
 
@@ -100,6 +106,7 @@ APP_SCRIPTS = {
     "loudness": "/opt/loudness/loudness.py",
     "channel38": "/opt/channel38/channel38.py",
     "weatherstar": "/opt/weatherstar/weatherstar_launcher.py",
+    "bebop": "/opt/bebop/bebop.py",
 }
 
 
@@ -276,6 +283,14 @@ def check_internet():
         return False
 
 
+def check_mpd():
+    try:
+        with socket.create_connection(("localhost", 6600), timeout=1.5):
+            return True
+    except OSError:
+        return False
+
+
 # None = always ready once the launcher exists (matches scrutinizer.py's
 # APPS table: BARS has no hw_check either).
 HW_CHECKS = {
@@ -283,6 +298,7 @@ HW_CHECKS = {
     "loudness": check_loudness_mic,
     "weatherstar": check_internet,
     "channel38": check_internet,
+    "bebop": check_mpd,
 }
 
 
