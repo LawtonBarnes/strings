@@ -28,7 +28,7 @@ import evdev
 import psutil
 from evdev import ecodes
 
-VERSION = "1.5"
+VERSION = "1.6"
 
 BASE_DIR = Path(__file__).resolve().parent
 STATE_PATH = BASE_DIR / "state.json"
