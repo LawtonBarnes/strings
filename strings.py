@@ -109,6 +109,33 @@ APP_SCRIPTS = {
     "bebop": "/opt/bebop/bebop.py",
 }
 
+# Paths STRINGS scans for each app's own VERSION constant, exposed via
+# /status's `versions` field (2026-08-23) so SCRUTE can show a puppet's
+# real installed version on the "ASSIGN TO <puppet>" menu instead of
+# MP's own (often absent) local copy of that app. Distinct from
+# APP_SCRIPTS above (used for the pkill sweep) since bebop.py itself
+# re-exports VERSION from menu.py rather than defining it directly
+# (`VERSION = menu.VERSION`, not a quoted literal) -- VERSION_RE below
+# only matches the latter, so bebop needs its own entry pointing at the
+# file that actually has one.
+VERSION_PATHS = {**APP_SCRIPTS, "bebop": "/opt/bebop/menu.py"}
+
+VERSION_RE = re.compile(r"""VERSION\s*=\s*['"]([^'"]+)['"]""")
+
+
+def read_app_version(script_path):
+    # Mirrors scrutinizer.py's own read_app_version exactly (same
+    # no-shared-library convention as the other duplicated helpers in
+    # this file) -- scans the source text for the VERSION constant
+    # rather than importing the module, so a puppet doesn't need that
+    # app's own dependencies/venv just to answer "what version is this."
+    try:
+        text = Path(script_path).read_text()
+    except OSError:
+        return "?"
+    match = VERSION_RE.search(text)
+    return match.group(1) if match else "?"
+
 
 def read_state():
     try:
@@ -524,6 +551,7 @@ def make_handler(supervisor, readiness_checker, relay_device):
                 status["agent_uptime_s"] = round(time.time() - supervisor.start_time, 1)
                 status["hardware"] = readiness_checker.get()
                 status["hostname"] = socket.gethostname()
+                status["versions"] = {app: read_app_version(path) for app, path in VERSION_PATHS.items()}
                 self._send_json(200, status)
             else:
                 self._send_json(404, {"error": "not found"})
