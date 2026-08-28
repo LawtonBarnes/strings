@@ -111,6 +111,7 @@ LAUNCH_COMMANDS = {
     "channel38": ["/usr/local/bin/channel38"],
     "weatherstar": ["/usr/local/bin/weatherstar"],
     "bebop": ["/usr/local/bin/bebop"],
+    "joanjett": ["/usr/local/bin/joanjett"],
 }
 KNOWN_APPS = set(LAUNCH_COMMANDS)
 
@@ -124,6 +125,7 @@ APP_SCRIPTS = {
     "channel38": "/opt/channel38/channel38.py",
     "weatherstar": "/opt/weatherstar/weatherstar_launcher.py",
     "bebop": "/opt/bebop/bebop.py",
+    "joanjett": "/opt/joanjett/main.py",
 }
 
 # Paths STRINGS scans for each app's own VERSION constant, exposed via
@@ -135,7 +137,7 @@ APP_SCRIPTS = {
 # (`VERSION = menu.VERSION`, not a quoted literal) -- VERSION_RE below
 # only matches the latter, so bebop needs its own entry pointing at the
 # file that actually has one.
-VERSION_PATHS = {**APP_SCRIPTS, "bebop": "/opt/bebop/menu.py"}
+VERSION_PATHS = {**APP_SCRIPTS, "bebop": "/opt/bebop/menu.py", "joanjett": "/opt/joanjett/config.py"}
 
 VERSION_RE = re.compile(r"""VERSION\s*=\s*['"]([^'"]+)['"]""")
 
@@ -367,6 +369,7 @@ HW_CHECKS = {
     "weatherstar": check_internet,
     "channel38": check_internet,
     "bebop": check_mpd,
+    "joanjett": None,
 }
 
 
