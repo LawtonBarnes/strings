@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """STRINGS -- puppet-side supervisor daemon for the McBrain fleet.
 
-Runs as a systemd service on puppet1-4 (never on masterofpuppets/MP or
-production/PR -- see the McBrain fleet-management plan). Unlike its
+Runs as a systemd service on puppet1-4 and production/PR (joined as a
+real STRINGS-supervised target 2026-08-16 -- see the McBrain fleet-
+management plan), never on masterofpuppets/MP, which stays the
+control/monitoring hub. Unlike its
 sibling apps (bars/loudness/channel38/weatherstar), STRINGS renders
 nothing itself -- it has no display code at all, so it doesn't need
 console/tty1 ownership and runs as a plain systemd service (Restart=
@@ -28,7 +30,7 @@ import evdev
 import psutil
 from evdev import ecodes
 
-VERSION = "1.6"
+VERSION = "1.8"
 
 BASE_DIR = Path(__file__).resolve().parent
 STATE_PATH = BASE_DIR / "state.json"
@@ -54,16 +56,15 @@ WIFI_IFACE = "wlan0"
 
 # Keys SCRUTE can relay live to whatever app is currently running here
 # (see /input below) -- content-adjustment keys (BARS pattern cycling,
-# LOUDNESS gain, Vol mute) plus Power (2026-08-17), NOT Home/Back/Q/Esc/
-# Compose. Those already mean "exit this app" in every app's own
-# handle_keycode (EXIT_GOTO_HOME, sys.exit, etc.) -- relaying them would
-# kill/restart whatever's running instead of just adjusting it. SCRUTE
-# itself is what those keys act on locally when a puppet is selected.
-# Power is relayed rather than kept local so the *target*'s own confirm
-# dialog shows on the machine you're actually controlling, not on the
-# machine holding the remote -- see scrutinizer.py's CONTROL_RELAY_KEYS
-# for the matching change and the logind power-key bug this depended on
-# fixing first (HandlePowerKey=ignore, all 6 fleet machines, same day).
+# LOUDNESS gain, Vol mute), NOT Home/Back/Q/Esc/Compose. Those already
+# mean "exit this app" in every app's own handle_keycode (EXIT_GOTO_HOME,
+# sys.exit, etc.) -- relaying them would kill/restart whatever's running
+# instead of just adjusting it. SCRUTE itself is what those keys act on
+# locally when a puppet is selected. Power used to be relayed here too
+# (2026-08-17, so the *target*'s own confirm dialog showed on the
+# machine being controlled) -- removed 2026-08-27 when Power became a
+# fleet-wide action instead of a single-machine one; see /power below,
+# which now handles it independent of whatever app is running.
 RELAY_KEYS = {
     "KEY_UP": ecodes.KEY_UP,
     "KEY_DOWN": ecodes.KEY_DOWN,
@@ -72,12 +73,28 @@ RELAY_KEYS = {
     "KEY_ENTER": ecodes.KEY_ENTER,
     "KEY_VOLUMEUP": ecodes.KEY_VOLUMEUP,
     "KEY_VOLUMEDOWN": ecodes.KEY_VOLUMEDOWN,
-    "KEY_POWER": ecodes.KEY_POWER,
     # bebop is the first app where Back means "go up a menu level"
     # rather than "exit the app" -- see scrutinizer.py's
     # _handle_control_mode_keycode for the app-aware relay decision
     # this key needs on the SCRUTE side.
     "KEY_BACK": ecodes.KEY_BACK,
+}
+
+# Actions for /power (2026-08-27) -- a real OS shutdown/reboot on this
+# machine, independent of whatever app is currently assigned/running
+# here. Distinct from the old Power-key /input relay above (which just
+# forwarded a keypress to the running app's own confirm dialog,
+# single-target only) -- this is SCRUTE's new fleet-wide Power button,
+# which now always means "take down every machine at once" rather than
+# whichever one currently owns the remote/control-mode target. logind's
+# own HandlePowerKey=ignore (set fleet-wide 2026-08-17) is unrelated to
+# this -- that only stops a raw physical KEY_POWER evdev event from
+# instantly powering things off; this endpoint runs a normal `shutdown`
+# command directly, same as every sibling app's own local power dialog
+# already does.
+POWER_ACTIONS = {
+    "shutdown": ["sudo", "shutdown", "-h", "now"],
+    "restart": ["sudo", "shutdown", "-r", "now"],
 }
 
 # Allow-list of launcher commands STRINGS will run, keyed by the same
@@ -490,9 +507,25 @@ class Supervisor:
         # alive 2-3 generations deep after SIGTERM alone didn't
         # propagate through sudo/openvt), preserved as a fallback for
         # anything that doesn't exit on its own in the grace window.
+        #
+        # Bug found 2026-08-28: the anchor assumed every app runs under
+        # the bare system `python3` -- true for bars/loudness/channel38/
+        # weatherstar, but bebop uses its own venv interpreter
+        # (/opt/bebop/venv/bin/python3, see /usr/local/bin/bebop), whose
+        # command line never starts with the literal string "python3".
+        # The old `^python3 ` anchor silently never matched bebop's real
+        # process at all -- it always skipped straight to the -9 sweep
+        # below, meaning bebop never got a graceful SIGTERM/finally-
+        # block chance to clean up (e.g. pausing MPD) on restart/
+        # reassign, only a hard SIGKILL. `[^ ]*` allows any no-space
+        # interpreter path (venv or bare) in front of "python3 " while
+        # still excluding the sudo/openvt wrapper line, whose command
+        # starts with "sudo " -- a space right after "sudo" breaks the
+        # match at that position, and the `^` anchor prevents retrying
+        # elsewhere in the string, so it's still correctly excluded.
         KILL_GRACE_SECONDS = 1.0
         for script in APP_SCRIPTS.values():
-            subprocess.run(["sudo", "pkill", "-15", "-f", f"^python3 {script}"], capture_output=True)
+            subprocess.run(["sudo", "pkill", "-15", "-f", f"^[^ ]*python3 {script}"], capture_output=True)
         time.sleep(KILL_GRACE_SECONDS)
         for script in APP_SCRIPTS.values():
             subprocess.run(["sudo", "pkill", "-9", "-f", script], capture_output=True)
@@ -629,6 +662,19 @@ def make_handler(supervisor, readiness_checker, relay_device):
                     return
                 send_relay_key(relay_device, key)
                 self._send_json(200, {"ok": True})
+            elif self.path == "/power":
+                action = payload.get("action")
+                if action not in POWER_ACTIONS:
+                    self._send_json(400, {"error": f"unknown action {action!r}, must be one of {sorted(POWER_ACTIONS)}"})
+                    return
+                # Respond before actually running shutdown -- once it
+                # goes through, this process (and everything else on the
+                # machine) gets torn down shortly after, so the caller
+                # needs its 200 OK sent first, not queued behind a
+                # subprocess call that's about to kill the process that
+                # would send it.
+                self._send_json(200, {"ok": True})
+                subprocess.run(POWER_ACTIONS[action])
             else:
                 self._send_json(404, {"error": "not found"})
 
