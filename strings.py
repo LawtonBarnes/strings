@@ -73,10 +73,11 @@ RELAY_KEYS = {
     "KEY_ENTER": ecodes.KEY_ENTER,
     "KEY_VOLUMEUP": ecodes.KEY_VOLUMEUP,
     "KEY_VOLUMEDOWN": ecodes.KEY_VOLUMEDOWN,
-    # bebop is the first app where Back means "go up a menu level"
-    # rather than "exit the app" -- see scrutinizer.py's
-    # _handle_control_mode_keycode for the app-aware relay decision
-    # this key needs on the SCRUTE side.
+    # Always relayed (generalized 2026-09-16, was bebop-only at first)
+    # -- Back means "go up a level within the app" for every app that
+    # cares (bebop's menu nav, TV DINNER's stop-playback-return-to-
+    # guide), never "exit control mode" -- Home/TARGET already cover
+    # that unconditionally on the SCRUTE side.
     "KEY_BACK": ecodes.KEY_BACK,
 }
 
