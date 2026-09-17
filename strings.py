@@ -112,6 +112,7 @@ LAUNCH_COMMANDS = {
     "weatherstar": ["/usr/local/bin/weatherstar"],
     "bebop": ["/usr/local/bin/bebop"],
     "joanjett": ["/usr/local/bin/joanjett"],
+    "tvdinner": ["/usr/local/bin/tvdinner"],
 }
 KNOWN_APPS = set(LAUNCH_COMMANDS)
 
@@ -126,6 +127,7 @@ APP_SCRIPTS = {
     "weatherstar": "/opt/weatherstar/weatherstar_launcher.py",
     "bebop": "/opt/bebop/bebop.py",
     "joanjett": "/opt/joanjett/main.py",
+    "tvdinner": "/opt/tvdinner/app.py",
 }
 
 # Paths STRINGS scans for each app's own VERSION constant, exposed via
@@ -361,6 +363,16 @@ def check_mpd():
         return False
 
 
+def check_tvdinner_media():
+    # The media drive lives on MP, shared to every other host over CIFS
+    # (see project_tv_dinner memory) -- a real mountpoint with content is
+    # what actually matters here, not just an fstab entry existing.
+    try:
+        return os.path.ismount("/mnt/tvdinner") and len(os.listdir("/mnt/tvdinner")) > 0
+    except OSError:
+        return False
+
+
 # None = always ready once the launcher exists (matches scrutinizer.py's
 # APPS table: BARS has no hw_check either).
 HW_CHECKS = {
@@ -370,6 +382,7 @@ HW_CHECKS = {
     "channel38": check_internet,
     "bebop": check_mpd,
     "joanjett": None,
+    "tvdinner": check_tvdinner_media,
 }
 
 
