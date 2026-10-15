@@ -30,7 +30,7 @@ import evdev
 import psutil
 from evdev import ecodes
 
-VERSION = "1.8"
+VERSION = "1.9"
 
 BASE_DIR = Path(__file__).resolve().parent
 STATE_PATH = BASE_DIR / "state.json"
@@ -114,6 +114,7 @@ LAUNCH_COMMANDS = {
     "bebop": ["/usr/local/bin/bebop"],
     "joanjett": ["/usr/local/bin/joanjett"],
     "tvdinner": ["/usr/local/bin/tvdinner"],
+    "sky": ["/usr/local/bin/sky"],
 }
 KNOWN_APPS = set(LAUNCH_COMMANDS)
 
@@ -129,6 +130,7 @@ APP_SCRIPTS = {
     "bebop": "/opt/bebop/bebop.py",
     "joanjett": "/opt/joanjett/main.py",
     "tvdinner": "/opt/tvdinner/app.py",
+    "sky": "/opt/sky/sky.py",
 }
 
 # Paths STRINGS scans for each app's own VERSION constant, exposed via
@@ -384,6 +386,7 @@ HW_CHECKS = {
     "bebop": check_mpd,
     "joanjett": None,
     "tvdinner": check_tvdinner_media,
+    "sky": check_internet,
 }
 
 
