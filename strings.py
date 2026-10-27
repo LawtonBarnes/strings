@@ -30,7 +30,7 @@ import evdev
 import psutil
 from evdev import ecodes
 
-VERSION = "1.10"
+VERSION = "1.11"
 
 BASE_DIR = Path(__file__).resolve().parent
 STATE_PATH = BASE_DIR / "state.json"
@@ -115,6 +115,7 @@ LAUNCH_COMMANDS = {
     "joanjett": ["/usr/local/bin/joanjett"],
     "tvdinner": ["/usr/local/bin/tvdinner"],
     "spacetruckin": ["/usr/local/bin/spacetruckin"],
+    "airmetal": ["/usr/local/bin/airmetal"],
 }
 KNOWN_APPS = set(LAUNCH_COMMANDS)
 
@@ -131,6 +132,7 @@ APP_SCRIPTS = {
     "joanjett": "/opt/joanjett/main.py",
     "tvdinner": "/opt/tvdinner/app.py",
     "spacetruckin": "/opt/spacetruckin/spacetruckin.py",
+    "airmetal": "/opt/airmetal/main.py",
 }
 
 # Paths STRINGS scans for each app's own VERSION constant, exposed via
@@ -142,7 +144,8 @@ APP_SCRIPTS = {
 # (`VERSION = menu.VERSION`, not a quoted literal) -- VERSION_RE below
 # only matches the latter, so bebop needs its own entry pointing at the
 # file that actually has one.
-VERSION_PATHS = {**APP_SCRIPTS, "bebop": "/opt/bebop/menu.py", "joanjett": "/opt/joanjett/config.py"}
+VERSION_PATHS = {**APP_SCRIPTS, "bebop": "/opt/bebop/menu.py", "joanjett": "/opt/joanjett/config.py",
+                 "airmetal": "/opt/airmetal/config.py"}
 
 VERSION_RE = re.compile(r"""VERSION\s*=\s*['"]([^'"]+)['"]""")
 
@@ -387,6 +390,10 @@ HW_CHECKS = {
     "joanjett": None,
     "tvdinner": check_tvdinner_media,
     "spacetruckin": check_internet,
+    # Reads P4's readsb over the LAN -- no local hardware to check, like
+    # JOAN JET on PRODUCTION. Only PRODUCTION installs it (it needs the
+    # 2x2 wall's 1024x768 frame).
+    "airmetal": None,
 }
 
 
