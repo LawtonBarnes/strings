@@ -30,7 +30,7 @@ import evdev
 import psutil
 from evdev import ecodes
 
-VERSION = "1.11"
+VERSION = "1.12"
 
 BASE_DIR = Path(__file__).resolve().parent
 STATE_PATH = BASE_DIR / "state.json"
@@ -116,6 +116,7 @@ LAUNCH_COMMANDS = {
     "tvdinner": ["/usr/local/bin/tvdinner"],
     "spacetruckin": ["/usr/local/bin/spacetruckin"],
     "airmetal": ["/usr/local/bin/airmetal"],
+    "thunderstruck": ["/usr/local/bin/thunderstruck"],
 }
 KNOWN_APPS = set(LAUNCH_COMMANDS)
 
@@ -133,6 +134,7 @@ APP_SCRIPTS = {
     "tvdinner": "/opt/tvdinner/app.py",
     "spacetruckin": "/opt/spacetruckin/spacetruckin.py",
     "airmetal": "/opt/airmetal/main.py",
+    "thunderstruck": "/opt/thunderstruck/thunderstruck.py",
 }
 
 # Paths STRINGS scans for each app's own VERSION constant, exposed via
@@ -394,6 +396,7 @@ HW_CHECKS = {
     # JOAN JET on PRODUCTION. Only PRODUCTION installs it (it needs the
     # 2x2 wall's 1024x768 frame).
     "airmetal": None,
+    "thunderstruck": check_internet,
 }
 
 
