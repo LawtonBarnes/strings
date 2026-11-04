@@ -30,7 +30,7 @@ import evdev
 import psutil
 from evdev import ecodes
 
-VERSION = "1.12"
+VERSION = "1.13"
 
 BASE_DIR = Path(__file__).resolve().parent
 STATE_PATH = BASE_DIR / "state.json"
@@ -146,7 +146,23 @@ APP_SCRIPTS = {
 # (`VERSION = menu.VERSION`, not a quoted literal) -- VERSION_RE below
 # only matches the latter, so bebop needs its own entry pointing at the
 # file that actually has one.
-VERSION_PATHS = {**APP_SCRIPTS, "bebop": "/opt/bebop/menu.py", "joanjett": "/opt/joanjett/config.py",
+# IDENTIFY (2026-11-03) is deliberately NOT a LAUNCH_COMMANDS app:
+# /assign can never pick it and it never lands in state.json. SCRUTE's
+# IDENTIFY row broadcasts POST /identify instead, which runs it in place
+# of the assigned app until turned off (or IDENTIFY_TIMEOUT_SECONDS
+# after the last /identify call, if MP never says so), then the
+# assigned app comes straight back. Page/color changes are written to
+# IDENTIFY_CONTROL_PATH, which identify.py polls, so flipping pages
+# doesn't restart it.
+IDENTIFY_APP = "identify"
+IDENTIFY_COMMAND = ["/usr/local/bin/identify"]
+IDENTIFY_SCRIPT = "/opt/identify/identify.py"
+IDENTIFY_CONTROL_PATH = Path("/tmp/identify.json")
+IDENTIFY_TIMEOUT_SECONDS = 15 * 60
+IDENTIFY_PAGES = (1, 2)
+IDENTIFY_COLORS = ("orange", "green", "white")
+
+VERSION_PATHS = {**APP_SCRIPTS, IDENTIFY_APP: IDENTIFY_SCRIPT, "bebop": "/opt/bebop/menu.py", "joanjett": "/opt/joanjett/config.py",
                  "airmetal": "/opt/airmetal/config.py"}
 
 VERSION_RE = re.compile(r"""VERSION\s*=\s*['"]([^'"]+)['"]""")
@@ -461,6 +477,7 @@ class Supervisor:
         self.app_started_at = None
         self.reload_event = threading.Event()
         self.start_time = time.time()
+        self.identify = None  # {"page", "color", "until"} while IDENTIFY is showing
 
     def current_status(self):
         with self.lock:
@@ -473,6 +490,11 @@ class Supervisor:
                     if (alive and self.app_started_at)
                     else None
                 ),
+                "identify": (
+                    {"page": self.identify["page"], "color": self.identify["color"],
+                     "remaining_s": round(max(0.0, self.identify["until"] - time.time()))}
+                    if self.identify else None
+                ),
             }
 
     def assign(self, app):
@@ -481,6 +503,40 @@ class Supervisor:
 
     def restart(self):
         self.reload_event.set()
+
+    def set_identify(self, page, color):
+        """Shows IDENTIFY (or just changes its page/color if it's already
+        up -- the control file does that without a relaunch). Every call
+        pushes the timeout back out."""
+        tmp = IDENTIFY_CONTROL_PATH.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"page": page, "color": color}))
+        tmp.replace(IDENTIFY_CONTROL_PATH)
+        with self.lock:
+            was_on = self.identify is not None
+            self.identify = {"page": page, "color": color,
+                             "until": time.time() + IDENTIFY_TIMEOUT_SECONDS}
+        if not was_on:
+            self.reload_event.set()
+
+    def clear_identify(self):
+        with self.lock:
+            was_on = self.identify is not None
+            self.identify = None
+        if was_on:
+            self.reload_event.set()
+
+    def _identify_active(self):
+        """True while IDENTIFY should be showing; lapses it (and wakes
+        run() to put the assigned app back) once the timeout passes."""
+        with self.lock:
+            if self.identify is None:
+                return False
+            if time.time() < self.identify["until"]:
+                return True
+            self.identify = None
+        print("[strings] identify timed out, restoring assigned app", flush=True)
+        self.reload_event.set()
+        return False
 
     def _terminate_current(self):
         with self.lock:
@@ -554,15 +610,16 @@ class Supervisor:
         # match at that position, and the `^` anchor prevents retrying
         # elsewhere in the string, so it's still correctly excluded.
         KILL_GRACE_SECONDS = 1.0
-        for script in APP_SCRIPTS.values():
+        scripts = [*APP_SCRIPTS.values(), IDENTIFY_SCRIPT]
+        for script in scripts:
             subprocess.run(["sudo", "pkill", "-15", "-f", f"^[^ ]*python3 {script}"], capture_output=True)
         time.sleep(KILL_GRACE_SECONDS)
-        for script in APP_SCRIPTS.values():
+        for script in scripts:
             subprocess.run(["sudo", "pkill", "-9", "-f", script], capture_output=True)
 
     def _try_launch(self, app):
         try:
-            return subprocess.Popen(LAUNCH_COMMANDS[app])
+            return subprocess.Popen(IDENTIFY_COMMAND if app == IDENTIFY_APP else LAUNCH_COMMANDS[app])
         except OSError as exc:
             print(f"[strings] failed to launch {app!r}: {exc}", flush=True)
             return None
@@ -570,8 +627,11 @@ class Supervisor:
     def run(self):
         while True:
             self.reload_event.clear()
-            app = read_state().get("app")
-            if not app or app not in KNOWN_APPS:
+            if self._identify_active():
+                app = IDENTIFY_APP
+            else:
+                app = read_state().get("app")
+            if app != IDENTIFY_APP and (not app or app not in KNOWN_APPS):
                 # No real assignment -- sit genuinely idle (nothing
                 # running) until an /assign call sets one and wakes
                 # reload_event. Doesn't touch state.json -- the *real*
@@ -606,6 +666,8 @@ class Supervisor:
 
             while proc.poll() is None and not self.reload_event.is_set():
                 time.sleep(POLL_INTERVAL_SECONDS)
+                if app == IDENTIFY_APP:
+                    self._identify_active()  # sets reload_event once it times out
 
             if self.reload_event.is_set():
                 self._terminate_current()
@@ -675,6 +737,22 @@ def make_handler(supervisor, readiness_checker, relay_device):
                     return
                 supervisor.assign(app or None)
                 self._send_json(200, {"ok": True, "app": app or None})
+            elif self.path == "/identify":
+                if not payload.get("on"):
+                    supervisor.clear_identify()
+                    self._send_json(200, {"ok": True, "identify": None})
+                    return
+                page = payload.get("page", 1)
+                color = payload.get("color", IDENTIFY_COLORS[0])
+                if page not in IDENTIFY_PAGES or color not in IDENTIFY_COLORS:
+                    self._send_json(400, {"error": f"page must be one of {list(IDENTIFY_PAGES)}, "
+                                                   f"color one of {list(IDENTIFY_COLORS)}"})
+                    return
+                if not Path(IDENTIFY_COMMAND[0]).exists():
+                    self._send_json(409, {"error": "identify isn't installed on this puppet"})
+                    return
+                supervisor.set_identify(page, color)
+                self._send_json(200, {"ok": True, "identify": {"page": page, "color": color}})
             elif self.path == "/restart":
                 supervisor.restart()
                 self._send_json(200, {"ok": True})

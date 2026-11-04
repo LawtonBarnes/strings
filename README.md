@@ -52,6 +52,15 @@ sudo systemctl enable --now strings
   shutdown/reboot on this specific machine (used by SCRUTE's
   fleet-wide Power dialog, which calls this on every machine at once).
 
+- `POST /identify {"on": true, "page": 1|2, "color": "orange"|"green"|"white"}`
+  -- show [IDENTIFY](https://github.com/LawtonBarnes/identify)'s screen
+  label in place of the assigned app (or change its page/color if it's
+  already up, without relaunching it). `{"on": false}` puts the
+  assigned app back. Never written to `state.json`, and lapses on its
+  own 15 minutes after the last call. `409` if `/usr/local/bin/identify`
+  isn't installed. `/status` reports it as `app: "identify"` plus an
+  `identify` field (page, color, seconds left) while it's up.
+
 ## Currently supported apps
 
 `bars`, `loudness`, `channel38`, `weatherstar`, `bebop`, `joanjett` --
