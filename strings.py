@@ -30,7 +30,7 @@ import evdev
 import psutil
 from evdev import ecodes
 
-VERSION = "1.13"
+VERSION = "1.14"
 
 BASE_DIR = Path(__file__).resolve().parent
 STATE_PATH = BASE_DIR / "state.json"
@@ -159,7 +159,7 @@ IDENTIFY_COMMAND = ["/usr/local/bin/identify"]
 IDENTIFY_SCRIPT = "/opt/identify/identify.py"
 IDENTIFY_CONTROL_PATH = Path("/tmp/identify.json")
 IDENTIFY_TIMEOUT_SECONDS = 15 * 60
-IDENTIFY_PAGES = (1, 2)
+IDENTIFY_PAGES = (1, 2, 3)  # 3 = MOCKUP (full-screen design mockup)
 IDENTIFY_COLORS = ("orange", "green", "white")
 
 VERSION_PATHS = {**APP_SCRIPTS, IDENTIFY_APP: IDENTIFY_SCRIPT, "bebop": "/opt/bebop/menu.py", "joanjett": "/opt/joanjett/config.py",
