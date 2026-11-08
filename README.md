@@ -1,5 +1,7 @@
 # STRINGS (`strings.py`)
 
+> **Fleet-only:** the per-Pi supervisor for a McBrain fleet. You don't need it to run any of the apps on a single Pi.
+
 The puppet-side supervisor daemon for a [McBrain](https://github.com/LawtonBarnes/mcbrain)
 fleet. Unlike its sibling apps ([BARS](https://github.com/LawtonBarnes/bars),
 [LOUDNESS](https://github.com/LawtonBarnes/loudness), etc.), STRINGS
