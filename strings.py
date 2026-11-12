@@ -30,7 +30,7 @@ import evdev
 import psutil
 from evdev import ecodes
 
-VERSION = "1.15"
+VERSION = "1.16"
 
 BASE_DIR = Path(__file__).resolve().parent
 STATE_PATH = BASE_DIR / "state.json"
@@ -117,6 +117,7 @@ LAUNCH_COMMANDS = {
     "spacetruckin": ["/usr/local/bin/spacetruckin"],
     "airmetal": ["/usr/local/bin/airmetal"],
     "thunderstruck": ["/usr/local/bin/thunderstruck"],
+    "sportatorium": ["/usr/local/bin/sportatorium"],
 }
 KNOWN_APPS = set(LAUNCH_COMMANDS)
 
@@ -135,6 +136,7 @@ APP_SCRIPTS = {
     "spacetruckin": "/opt/spacetruckin/spacetruckin.py",
     "airmetal": "/opt/airmetal/main.py",
     "thunderstruck": "/opt/thunderstruck/thunderstruck.py",
+    "sportatorium": "/opt/sportatorium/player.py",
 }
 
 # Paths STRINGS scans for each app's own VERSION constant, exposed via
@@ -163,7 +165,9 @@ IDENTIFY_PAGES = (1, 2, 3)  # 3 = MOCKUP (full-screen design mockup)
 IDENTIFY_COLORS = ("orange", "green", "white")
 
 VERSION_PATHS = {**APP_SCRIPTS, IDENTIFY_APP: IDENTIFY_SCRIPT, "bebop": "/opt/bebop/menu.py", "joanjett": "/opt/joanjett/config.py",
-                 "airmetal": "/opt/airmetal/config.py"}
+                 "airmetal": "/opt/airmetal/config.py",
+                 # player.py takes VERSION from common.py (`VERSION = common.VERSION`)
+                 "sportatorium": "/opt/sportatorium/common.py"}
 
 VERSION_RE = re.compile(r"""VERSION\s*=\s*['"]([^'"]+)['"]""")
 
@@ -418,6 +422,9 @@ HW_CHECKS = {
     # 2x2 wall's 1024x768 frame).
     "airmetal": None,
     "thunderstruck": check_internet,
+    # Plays from its own local cache and shows SIGNAL LOST itself when
+    # the library on MP is unreachable -- nothing to gate on.
+    "sportatorium": None,
 }
 
 
