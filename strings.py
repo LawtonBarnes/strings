@@ -30,7 +30,7 @@ import evdev
 import psutil
 from evdev import ecodes
 
-VERSION = "1.16"
+VERSION = "1.17"
 
 BASE_DIR = Path(__file__).resolve().parent
 STATE_PATH = BASE_DIR / "state.json"
@@ -118,6 +118,7 @@ LAUNCH_COMMANDS = {
     "airmetal": ["/usr/local/bin/airmetal"],
     "thunderstruck": ["/usr/local/bin/thunderstruck"],
     "sportatorium": ["/usr/local/bin/sportatorium"],
+    "exitrow": ["/usr/local/bin/exitrow"],
 }
 KNOWN_APPS = set(LAUNCH_COMMANDS)
 
@@ -137,6 +138,9 @@ APP_SCRIPTS = {
     "airmetal": "/opt/airmetal/main.py",
     "thunderstruck": "/opt/thunderstruck/thunderstruck.py",
     "sportatorium": "/opt/sportatorium/player.py",
+    # AIR METAL's side windows -- lives in the airmetal repo, with its own
+    # VERSION literal in exitrow.py.
+    "exitrow": "/opt/airmetal/exitrow.py",
 }
 
 # Paths STRINGS scans for each app's own VERSION constant, exposed via
@@ -425,6 +429,9 @@ HW_CHECKS = {
     # Plays from its own local cache and shows SIGNAL LOST itself when
     # the library on MP is unreachable -- nothing to gate on.
     "sportatorium": None,
+    # P4's readsb + AIR METAL's ride link on QUAD, both over the LAN; it
+    # shows its gate standby when either is missing.
+    "exitrow": None,
 }
 
 
